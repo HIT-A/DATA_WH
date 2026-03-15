@@ -1,0 +1,21 @@
+name: Course Sync
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger repos-management workflow
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.actions.createWorkflowDispatch({
+              owner: 'HIT-A',
+              repo: 'repos-management',
+              workflow_id: 'course_weihai.yml',
+              ref: 'main'
+            })

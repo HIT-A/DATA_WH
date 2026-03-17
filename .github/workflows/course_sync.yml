@@ -5,17 +5,103 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   sync:
+    if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     steps:
-      - name: Trigger repos-management workflow
-        uses: actions/github-script@v7
+      - name: Check PAT wiring
+        run: |
+          if [ -z "${{ secrets.PAT }}" ]; then
+            echo "PAT is EMPTY"
+            exit 1
+          else
+            echo "PAT is SET"
+          fi
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
         with:
-          script: |
-            github.rest.actions.createWorkflowDispatch({
-              owner: 'HIT-A',
-              repo: 'repos-management',
-              workflow_id: 'course_weihai.yml',
-              ref: 'main'
-            })
+          fetch-depth: 0
+          token: ${{ secrets.PAT }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Run bidirectional sync for changed courses
+        id: rdme
+        run: |
+          set -euo pipefail
+
+          # Optional formatter used by rdme_autogen.py.
+          set +e
+          ver="0.10.0"
+          arch="$(uname -m)"
+          taplo_arch=""
+          if [ "$arch" = "x86_64" ]; then taplo_arch="x86_64"; fi
+          if [ "$arch" = "aarch64" ] || [ "$arch" = "arm64" ]; then taplo_arch="aarch64"; fi
+          if [ -n "$taplo_arch" ]; then
+            url="https://github.com/tamasfe/taplo/releases/download/${ver}/taplo-linux-${taplo_arch}.gz"
+            curl -Ls "$url" | gzip -d > taplo
+            chmod +x taplo
+            sudo mv taplo /usr/local/bin/taplo
+          fi
+          set -e
+
+          SCRIPTS_BASE="https://raw.githubusercontent.com/HIT-A/repos-management/main/scripts"
+          curl -Ls -o /tmp/rdme_autogen.py "${SCRIPTS_BASE}/rdme_autogen.py"
+
+          tmp_dirs="$(mktemp)"
+          if git rev-parse HEAD~1 >/dev/null 2>&1; then
+            git diff --name-only HEAD~1 HEAD | \
+              grep -E '^courses/[^/]+/(readme\.toml|README\.md)$' | \
+              awk -F/ '{print $1"/"$2}' | sort -u > "$tmp_dirs" || true
+          fi
+
+          if [ ! -s "$tmp_dirs" ]; then
+            find courses -mindepth 1 -maxdepth 1 -type d | sort > "$tmp_dirs" || true
+          fi
+
+          echo "Targets:"
+          cat "$tmp_dirs" || true
+
+          failed=0
+          while IFS= read -r d; do
+            [ -z "$d" ] && continue
+            if [ ! -f "$d/readme.toml" ] && [ ! -f "$d/README.md" ]; then
+              continue
+            fi
+
+            echo "[rdme] sync $d"
+            if ! python3 /tmp/rdme_autogen.py \
+              --toml "$d/readme.toml" \
+              --readme "$d/README.md" \
+              --converter-url "${SCRIPTS_BASE}/convert_toml_to_readme.py" \
+              --reverse-converter-url "${SCRIPTS_BASE}/readme_to_toml.py"; then
+              failed=1
+            fi
+          done < "$tmp_dirs"
+
+          echo "failed=$failed" >> "$GITHUB_OUTPUT"
+
+      - name: Commit and push sync results
+        run: |
+          set -euo pipefail
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git add courses/*/readme.toml courses/*/README.md || true
+          if git diff --staged --quiet; then
+            echo "No sync changes to commit."
+            exit 0
+          fi
+          git commit -m "ci: bidirectional sync toml <-> README [automated] [skip ci]"
+          git push origin HEAD:main
+
+      - name: Fail if sync had errors
+        if: steps.rdme.outputs.failed == '1'
+        run: exit 1

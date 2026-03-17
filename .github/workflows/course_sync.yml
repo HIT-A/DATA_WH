@@ -3,14 +3,22 @@ name: Course Sync
 on:
   push:
     branches: [main]
+    paths:
+      - 'courses/**/readme.toml'
+      - 'courses/**/README.md'
+      - '.github/workflows/course_sync.yml'
   workflow_dispatch:
+
+concurrency:
+  group: course-sync-main
+  cancel-in-progress: true
 
 permissions:
   contents: write
 
 jobs:
   sync:
-    if: github.actor != 'github-actions[bot]'
+    if: github.actor != 'github-actions[bot]' && !contains(github.event.head_commit.message, '[automated]')
     runs-on: ubuntu-latest
     steps:
       - name: Check PAT wiring
@@ -57,8 +65,9 @@ jobs:
           curl -Ls -o /tmp/rdme_autogen.py "${SCRIPTS_BASE}/rdme_autogen.py"
 
           tmp_dirs="$(mktemp)"
-          if git rev-parse HEAD~1 >/dev/null 2>&1; then
-            git diff --name-only HEAD~1 HEAD | \
+          before_sha="${{ github.event.before }}"
+          if [ -n "$before_sha" ] && git cat-file -e "$before_sha"^{commit} 2>/dev/null; then
+            git diff --name-only "$before_sha" "${{ github.sha }}" | \
               grep -E '^courses/[^/]+/(readme\.toml|README\.md)$' | \
               awk -F/ '{print $1"/"$2}' | sort -u > "$tmp_dirs" || true
           fi
